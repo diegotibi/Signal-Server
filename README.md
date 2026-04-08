@@ -17,9 +17,9 @@ WARNING: The accuracy of the output is directly proportional to the accuracy of 
 
 
 ## Requirements
-* C++14-conformant C++ compiler (GCC,G++ / clang)
+* C++14-conformant C++ compiler (GCC / clang)
 * Build environment for C++ (linker, C++ Standard Library and so forth) 
-* CMake v3.5 or newer
+* CMake v3.13 or newer
 * Convert (part of ImageMagick)
 * For some additional scripts: Bash and Python interpreter
 * library pthread: POSIX threads library
@@ -27,12 +27,33 @@ WARNING: The accuracy of the output is directly proportional to the accuracy of 
 * library dl: Open and close a shared object - POSIX conform
 * library z: zlib is a general-purpose lossless data-compression library
 * Multicore CPU (optional but recomended)
-* ~2GB Memory
+* 4 GiB RAM for near range coverage maps; 8 GiB RAM for long range coverage maps
 * SRTM terrain tile(s) or ASCII Grid tile(s)
 
 Signal Server is a very resource intensive multicore application. Only publish it for common use if you know what you are doing and you are advised to wrap it with another script to perform input validation.
 
 Additional programs/scripts will be required to prepare inputs such as .hgt tiles (srtm2sdf.c), 3D antenna patterns (.ant) and user defined clutter (.udt). More information can be found in the SPLAT! project.
+
+## Recommendations
+
+### Security
+Recommendations for security reasons. Source:  
+https://best.openssf.org/Compiler-Hardening-Guides/Compiler-Options-Hardening-Guide-for-C-and-C++
+* C++-Compiler: GCC or clang. Minimum version: GCC version 13 or clang 16.0.0
+* C++ Standard library: libstdc++ (GNU) or libc++ (clang). Minimum version: libstdc++ 6.0 or libc++ 3.3.0. 
+* GNU Binutils with GNU linker (ld): Minimum version: Binutils 2.16
+
+Replace in CMakeLists.txt line "-D_GLIBCXX_ASSERTIONS" with "-D_LIBCPP_ASSERT" for libc++.  
+Replace in CMakeLists.txt line "-fcf-protection=full" with "-mbranch-protection=standard" for Apple silicon (ARM).
+
+### Performance
+Recommendations for good performance. Sources:  
+https://developers.redhat.com/blog/2021/01/05/building-red-hat-enterprise-linux-9-for-the-x86-64-v2-microarchitecture-level  
+https://developers.redhat.com/articles/2024/01/02/exploring-x86-64-v3-red-hat-enterprise-linux-10
+* One or more fast x86_64 CPU (x86-64-v3) or fast Apple silicon (ARM).
+
+Remove line "-march=x86-64-v3" in CMakeLists.txt for Apple silicon (ARM) and slower x86_64 CPU.
+
 
 ## File extensions and types used by signalserver:
 ```
@@ -61,16 +82,46 @@ Additional programs/scripts will be required to prepare inputs such as .hgt tile
 ## Install dependencies
 Assuming Debian / Ubuntu, this will fetch the core libraries needed to build it as well as an image library for manipulating outputs.
 ```
-sudo apt-get install g++ cmake libbz2-dev imagemagick spdlog
+#include <iostream>
+
+using namespace std;
+
+int main()
+{
+    cout << "Hello World!" << endl;
+    return 0;
+}
+```
+
+CMakeLists.txt
+```
+cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
+
+project(HelloWorld LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(CMAKE_CXX_FLAGS "-O2")
+
+add_executable(HelloWorld main.cc)
+```
+
+```
+# cmake .
+# cmake --build .
+# ./HelloWorld
+=> HelloWorld!
 ```
 
 ## Installation
 Change into the source directory to build the binaries.
 ```
-mkdir build
-cd build
-cmake ../src
-make
+cd src
+cmake .
+cmake --build .
+sudo cmake --build . --target install
 ```
 
 ## Test (needs updating)
@@ -79,6 +130,11 @@ Test output will be in output/tests
 ```
 ./test.sh
 ```
+Open html file:
+```
+/tmp/tests/Regacom_Tests_WebMercator.html
+```
+with your web browser.
 
 ## Parameters
 ```
