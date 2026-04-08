@@ -34,9 +34,14 @@ struct dem {
 	float max_north;
 	float min_west;
 	float max_west;
+    int rows;
+    int cols;
 	long min_x, max_x, min_y, max_y;
 	int max_el;
 	int min_el;
+    short *data_block;
+    unsigned char *mask_block;
+    unsigned char *signal_block;
 	short **data;
 	unsigned char **mask;
 	unsigned char **signal;
@@ -126,6 +131,8 @@ extern double eastoffset;
 extern double delta;
 extern double cropLat;
 extern double cropLon;
+extern double coverage_azimuth;
+extern double coverage_width_deg;
 
 extern char string[];
 extern char sdf_path[];
@@ -142,5 +149,19 @@ extern struct LR LR;
 extern struct region region;
 
 extern int debug;
+extern bool allocate_signal_map;
+extern bool coverage_sector_enabled;
+extern int dem_alloc_rows;
+extern int dem_alloc_cols;
+
+static inline bool DemPointInBounds(int indx, int x, int y)
+{
+    return (dem != NULL &&
+            indx >= 0 && indx < MAXPAGES &&
+            dem[indx].data != NULL &&
+            x >= 0 && y >= 0 &&
+            x < dem[indx].rows &&
+            y < dem[indx].cols);
+}
 
 #endif /* _COMMON_HH_ */

@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+#include <thread>
 #include <bzlib.h>
 #include <zlib.h>
 
@@ -34,6 +35,7 @@
 #include "common.hh"
 #include "inputs.hh"
 #include "outputs.hh"
+#include "geo.hh"
 #include "models/itwom3.0.hh"
 #include "models/los.hh"
 #include "models/pel.hh"
@@ -53,7 +55,8 @@ double earthradius, max_range = 0.0, forced_erp, dpp, ppd, yppd,
     north, east, south, west, dBm, loss, field_strength,
     min_north = 90, max_north = -90, min_west = 360, max_west = -1,
     westoffset=180, eastoffset=-180, delta=0, rxGain=0, antenna_rotation,
-    antenna_downtilt,antenna_dt_direction, cropLat=-70, cropLon=0,cropLonNeg=0;
+    antenna_downtilt,antenna_dt_direction, cropLat=-70, cropLon=0,cropLonNeg=0,
+    coverage_azimuth = 0.0, coverage_width_deg = 360.0;
 
 int ippd, mpi, max_elevation = -32768, min_elevation = 32768, bzerror, gzerr,
     contour_threshold, pred, pblue, pgreen, ter, multiplier = 256, debug = 0,
@@ -65,6 +68,10 @@ long bzbuf_pointer = 0L, bzbytes_read, gzbuf_pointer = 0L, gzbytes_read;
 unsigned char got_elevation_pattern, got_azimuth_pattern, metric = 0, dbm = 0;
 
 bool to_stdout = false, cropping = true;
+bool allocate_signal_map = true;
+bool coverage_sector_enabled = false;
+int dem_alloc_rows = 0;
+int dem_alloc_cols = 0;
 
 __thread double *elev;
 __thread struct path path;
@@ -164,6 +171,36 @@ void *dec2dms(double decimal, char *string)
     return (string);
 }
 
+static int estimate_required_pages(const bbox &region, int max_pages_cap)
+{
+    const double lat_span = fabs(region.upper_left.lat - region.lower_right.lat);
+    const double lon_span = fabs(LonDiff(region.upper_left.lon, region.lower_right.lon));
+
+    const int lat_tiles = (int)ceil(lat_span) + 1;
+    const int lon_tiles = (int)ceil(lon_span) + 1;
+
+    int estimated = (lat_tiles * lon_tiles) + 8; // keep headroom for edge conditions
+    if (estimated < 8)
+        estimated = 8;
+    if (estimated > max_pages_cap)
+        estimated = max_pages_cap;
+
+    return estimated;
+}
+
+static int estimate_los_sweep_points(double radius_miles, double sweep_deg, int pixels_per_degree)
+{
+    if (radius_miles <= 0.0 || sweep_deg <= 0.0 || pixels_per_degree <= 0)
+        return 1;
+
+    const double radius_km = radius_miles * KM_PER_MILE;
+    const double radius_deg = radius_km / KM_PER_DEG_LAT;
+    const double radius_px = radius_deg * (double)pixels_per_degree;
+    const double circumference_px = radius_px * TWOPI;
+    const int points = (int)ceil(circumference_px * (sweep_deg / 360.0));
+    return (points < 1 ? 1 : points);
+}
+
 int PutMask(double lat, double lon, int value)
 {
     /* Lines, text, markings, and coverage areas are stored in a
@@ -175,11 +212,21 @@ int PutMask(double lat, double lon, int value)
     int x = 0, y = 0, indx;
     char found;
 
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, lon)));
+        if (DemPointInBounds(0, x, y)) {
+            dem[0].mask[x][y] = value;
+            return ((int)dem[0].mask[x][y]);
+        }
+        return -1;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (lat - dem[indx].min_north));
         y = mpi - (int)rint(yppd * (LonDiff(dem[indx].max_west, lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
@@ -205,11 +252,21 @@ int OrMask(double lat, double lon, int value)
     int x = 0, y = 0, indx;
     char found;
 
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, lon)));
+        if (DemPointInBounds(0, x, y)) {
+            dem[0].mask[x][y] |= value;
+            return ((int)dem[0].mask[x][y]);
+        }
+        return -1;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (lat - dem[indx].min_north));
         y = mpi - (int)rint(yppd * (LonDiff(dem[indx].max_west, lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
@@ -248,17 +305,25 @@ void PutSignal(double lat, double lon, unsigned char signal)
         hottest = signal;
 
     //lookup x/y for this co-ord
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, lon)));
+        if (DemPointInBounds(0, x, y) && dem[0].signal != NULL)
+            dem[0].signal[x][y] = signal;
+        return;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (lat - dem[indx].min_north));
         y = mpi - (int)rint(yppd * (LonDiff(dem[indx].max_west, lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
     }
 
-    if (found) {		// Write values to file
+    if (found && dem[indx].signal != NULL) {		// Write values to file
         dem[indx].signal[x][y] = signal;
         // return (dem[indx].signal[x][y]);
         return;
@@ -277,17 +342,25 @@ unsigned char GetSignal(double lat, double lon)
     int x = 0, y = 0, indx;
     char found;
 
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, lon)));
+        if (DemPointInBounds(0, x, y) && dem[0].signal != NULL)
+            return dem[0].signal[x][y];
+        return 0;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (lat - dem[indx].min_north));
         y = mpi - (int)rint(yppd * (LonDiff(dem[indx].max_west, lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
     }
 
-    if (found)
+    if (found && dem[indx].signal != NULL)
         return (dem[indx].signal[x][y]);
     else
         return 0;
@@ -303,13 +376,21 @@ double GetElevation(struct site location)
     int x = 0, y = 0, indx;
     double elevation;
 
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (location.lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, location.lon)));
+        if (DemPointInBounds(0, x, y))
+            return 3.28084 * dem[0].data[x][y];
+        return -5000.0;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (location.lat - dem[indx].min_north));
         y = mpi -
             (int)rint(yppd *
                   (LonDiff(dem[indx].max_west, location.lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
@@ -333,11 +414,30 @@ int AddElevation(double lat, double lon, double height, int size)
     char found;
     int i,j,x = 0, y = 0, indx;
 
+    if (MAXPAGES == 1) {
+        x = (int)rint(ppd * (lat - dem[0].min_north));
+        y = mpi - (int)rint(yppd * (LonDiff(dem[0].max_west, lon)));
+        if (DemPointInBounds(0, x, y)) {
+            if (size < 2)
+                dem[0].data[x][y] += (short)rint(height);
+            if (size > 1) {
+                for (i = size * -1; i <= size; i = i + 1) {
+                    for (j = size * -1; j <= size; j = j + 1) {
+                        if (DemPointInBounds(0, x + j, y + i))
+                            dem[0].data[x + j][y + i] += (short)rint(height);
+                    }
+                }
+            }
+            return 1;
+        }
+        return 0;
+    }
+
     for (indx = 0, found = 0; indx < MAXPAGES && found == 0;) {
         x = (int)rint(ppd * (lat - dem[indx].min_north));
         y = mpi - (int)rint(yppd * (LonDiff(dem[indx].max_west, lon)));
 
-        if (x >= 0 && x <= mpi && y >= 0 && y <= mpi)
+        if (DemPointInBounds(indx, x, y))
             found = 1;
         else
             indx++;
@@ -350,7 +450,7 @@ int AddElevation(double lat, double lon, double height, int size)
     if (found && size>1){
         for(i=size*-1; i <= size; i=i+1){
             for(j=size*-1; j <= size; j=j+1){
-                if(x+j >= 0 && x+j <=IPPD && y+i >= 0 && y+i <=IPPD)
+                if(DemPointInBounds(indx, x + j, y + i))
                     dem[indx].data[x+j][y+i] += (short)rint(height);
             }
 
@@ -460,7 +560,7 @@ double ElevationAngle(struct site source, struct site destination)
        (downtilt), as referenced to a normal to the center of
        the earth. */
 
-    register double a, b, dx;
+    double a, b, dx;
 
     a = GetElevation(destination) + destination.alt + earthradius;
     b = GetElevation(source) + source.alt + earthradius;
@@ -971,17 +1071,23 @@ void ObstructionAnalysis(struct site xmtr, struct site rcvr, double f,
 void free_dem(void)
 {
     int i;
-    int j;
+
+    if (dem == NULL)
+        return;
 
     for (i = 0; i < MAXPAGES; i++) {
-        for (j = 0; j < IPPD; j++) {
-            delete [] dem[i].data[j];
-            delete [] dem[i].mask[j];
-            delete [] dem[i].signal[j];
-        }
+        if (dem[i].data == NULL || dem[i].mask == NULL)
+            continue;
+
+        delete [] dem[i].data_block;
+        delete [] dem[i].mask_block;
+        if (dem[i].signal_block != NULL)
+            delete [] dem[i].signal_block;
+
         delete [] dem[i].data;
         delete [] dem[i].mask;
-        delete [] dem[i].signal;
+        if (dem[i].signal != NULL)
+            delete [] dem[i].signal;
     }
     delete [] dem;
 }
@@ -1007,16 +1113,25 @@ void alloc_dem(void)
 {
     int i;
     int j;
+    int rows = (dem_alloc_rows > 0 ? dem_alloc_rows : IPPD);
+    int cols = (dem_alloc_cols > 0 ? dem_alloc_cols : IPPD);
+    size_t n = (size_t)rows * (size_t)cols;
 
     dem = new struct dem[MAXPAGES];
     for (i = 0; i < MAXPAGES; i++) {
-        dem[i].data = new short *[IPPD];
-        dem[i].mask = new unsigned char *[IPPD];
-        dem[i].signal = new unsigned char *[IPPD];
-        for (j = 0; j < IPPD; j++) {
-            dem[i].data[j] = new short[IPPD];
-            dem[i].mask[j] = new unsigned char[IPPD];
-            dem[i].signal[j] = new unsigned char[IPPD];
+        dem[i].rows = rows;
+        dem[i].cols = cols;
+        dem[i].data_block = new short[n];
+        dem[i].mask_block = new unsigned char[n];
+        dem[i].signal_block = allocate_signal_map ? new unsigned char[n] : NULL;
+        dem[i].data = new short *[rows];
+        dem[i].mask = new unsigned char *[rows];
+        dem[i].signal = allocate_signal_map ? new unsigned char *[rows] : NULL;
+        for (j = 0; j < rows; j++) {
+            dem[i].data[j] = dem[i].data_block + ((size_t)j * (size_t)cols);
+            dem[i].mask[j] = dem[i].mask_block + ((size_t)j * (size_t)cols);
+            if (dem[i].signal != NULL)
+                dem[i].signal[j] = dem[i].signal_block + ((size_t)j * (size_t)cols);
         }
     }
 }
@@ -1044,6 +1159,8 @@ void do_allocs(void)
         dem[i].max_north = -90;
         dem[i].min_west = 360;
         dem[i].max_west = -1;
+        dem[i].rows = (dem_alloc_rows > 0 ? dem_alloc_rows : IPPD);
+        dem[i].cols = (dem_alloc_cols > 0 ? dem_alloc_cols : IPPD);
     }
 }
 
@@ -1054,21 +1171,19 @@ int main(int argc, char *argv[])
 
     PropModel prop_model;
 
-    double min_lat, min_lon, max_lat, max_lon, rxlat, rxlon, txlat, txlon,
-      west_min, west_max, nortRxHin, nortRxHax;
+    double min_lat, min_lon, max_lat, max_lon, rxlat, rxlon;
 
     bool use_threads = true;
+    bool segments_user_set = false;
 
     bool use_radial = false;
 
-    unsigned char LRmap = 0, txsites = 0, topomap = 0, geo = 0, kml =
-        0, area_mode = 0, max_txsites, ngs = 0;
+    unsigned char txsites = 0, geo = 0, kml = 0, ngs = 0;
 
     char mapfile[255], ano_filename[255], lidar_tiles[27000], clutter_file[255],antenna_file[255];
     char *az_filename, *el_filename, *udt_file = NULL;
 
-    double altitude = 0.0, altitudeLR = 0.0, tx_range = 0.0,
-        rx_range = 0.0, deg_range = 0.0, deg_limit = 0.0, deg_range_lon;
+    double altitudeLR = 0.0;
 
     if (strstr(argv[0], "signalserverHD")) {
             MAXPAGES = 32;  // was 9
@@ -1130,7 +1245,7 @@ int main(int argc, char *argv[])
         fprintf(stdout, "     -rel Reliability for ITM model (%% of 'time') 1 to 99 (optional, default 50%%)\n");
         fprintf(stdout, "     -conf Confidence for ITM model (%% of 'situations') 1 to 99 (optional, default 50%%)\n");
         fprintf(stdout, "     -resample Reduce Lidar resolution by specified factor (2 = 50%%)\n");
-        fprintf(stdout, "     -segments Number of segments to divide the plot rectangle into (must be even and > 4)\n");
+        fprintf(stdout, "     -segments Number of angular worker segments for LOS/radial processing (>= 1)\n");
         fprintf(stdout, "Output:\n");
         fprintf(stdout, "     -o basename (Output file basename - required, min 5 chars)\n");
         fprintf(stdout,	"     -dbm Plot Rxd signal power instead of field strength in dBuV/m\n");
@@ -1149,6 +1264,7 @@ int main(int argc, char *argv[])
         fprintf(stdout,	"     -rxg Rx gain dBd (optional for PPA text report)\n");
         fprintf(stdout,	"     -hp Horizontal Polarisation (default=vertical)\n");
         fprintf(stdout, "     -rot  (  0.0 - 359.0 degrees, default 0.0) Antenna Pattern Rotation\n");
+        fprintf(stdout, "     -beam LOS sector width in degrees centered on -rot (default 360)\n");
         fprintf(stdout, "     -dt   ( -10.0 - 90.0 degrees, default 0.0) Antenna Downtilt\n");
         fprintf(stdout, "     -dtdir ( 0.0 - 359.0 degrees, default 0.0) Antenna Downtilt Direction\n");
         fprintf(stdout, "Debugging:\n");
@@ -1163,14 +1279,6 @@ int main(int argc, char *argv[])
 
         return 1;
     }
-
-    /*
-     * If we're not called as signalserverLIDAR we can allocate various
-     * memory now. For LIDAR we need to wait until we've parsed
-     * the headers in the .asc file to know how much memory to allocate...
-     */
-    if (!lidar)
-        do_allocs();
 
     y = argc - 1;
     kml = 0;
@@ -1187,7 +1295,6 @@ int main(int argc, char *argv[])
     udt_file = NULL;
     color_file = NULL;
     path.length = 0;
-    max_txsites = 30;
     fzone_clearance = 0.6;
     contour_threshold = 0;
     resample = 0;
@@ -1201,8 +1308,6 @@ int main(int argc, char *argv[])
     txh = 0;
     ngs = 1;		// no terrain background
     kml = 1;
-    LRmap = 1;
-    area_mode = 1;
     ippd = IPPD;		// default resolution
 
     sscanf("0.1", "%lf", &altitudeLR);
@@ -1280,6 +1385,14 @@ int main(int argc, char *argv[])
                     antenna_rotation = 0.0;
                 if (antenna_rotation > 359.0)
                     antenna_rotation = 0.0;
+            }
+        }
+
+        if (strcmp(argv[x], "-beam") == 0 || strcmp(argv[x], "-beamwidth") == 0) {
+            z = x + 1;
+
+            if (z <= y && argv[z][0] && argv[z][0] != '-') {
+                sscanf(argv[z], "%lf", &coverage_width_deg);
             }
         }
 
@@ -1404,10 +1517,10 @@ int main(int argc, char *argv[])
         if (strcmp(argv[x], "-lid") == 0) {
             z = x + 1;
             lidar=1;
-            if (z <= y && argv[z][0] && argv[z][0] != '-') {
-                strncpy(lidar_tiles, argv[z], 27000); // 900 tiles!
-                spdlog::info("LIDAR directory: {}", lidar_tiles);
-            }
+	            if (z <= y && argv[z][0] && argv[z][0] != '-') {
+	                snprintf(lidar_tiles, sizeof(lidar_tiles), "%s", argv[z]); // 900 tiles!
+	                spdlog::info("LIDAR directory: {}", lidar_tiles);
+	            }
         }
 
         if (strcmp(argv[x], "-res") == 0) {
@@ -1718,6 +1831,7 @@ int main(int argc, char *argv[])
 
             if (z <= y && argv[z][0]) {
                 sscanf(argv[z], "%d", &segments);
+                segments_user_set = true;
             }
         }
     }
@@ -1728,6 +1842,23 @@ int main(int argc, char *argv[])
     } else {
         spdlog::set_level(spdlog::level::info);
     }
+
+    // This build is focused on LOS-only propagation use-cases.
+    if (prop_model != LOS) {
+        spdlog::warn("Propagation model {} requested, forcing LOS (2).", static_cast<int>(prop_model));
+        prop_model = LOS;
+    }
+    allocate_signal_map = (prop_model != LOS);
+
+    if (coverage_width_deg <= 0.0 || coverage_width_deg > 360.0) {
+        spdlog::error("LOS beam width must be > 0 and <= 360 degrees");
+        exit(EINVAL);
+    }
+    if (antenna_rotation < 0.0)
+        coverage_azimuth = 0.0;
+    else
+        coverage_azimuth = antenna_rotation;
+    coverage_sector_enabled = (coverage_width_deg < 360.0);
 
     /* ERROR DETECTION */
     if (tx_site[0].lat > 90 || tx_site[0].lat < -90) {
@@ -1798,7 +1929,6 @@ int main(int argc, char *argv[])
     if (metric) {
         altitudeLR /= METERS_PER_FOOT;	/* 10ft * 0.3 = 3.3m */
         max_range /= KM_PER_MILE;	/* 10 / 1.6 = 7.5 */
-        altitude /= METERS_PER_FOOT;
         tx_site[0].alt /= METERS_PER_FOOT;	/* Feet to metres */
         tx_site[1].alt /= METERS_PER_FOOT;	/* Feet to metres */
         clutter /= METERS_PER_FOOT;	/* Feet to metres */
@@ -1816,8 +1946,34 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (segments % 2 != 0 || segments < 4) {
-        spdlog::error("Number of segments must be even and greater than 4");
+    if (segments < 1) {
+        spdlog::error("Number of segments must be >= 1");
+        exit(EINVAL);
+    }
+
+    if (prop_model == LOS && use_threads && !segments_user_set) {
+        unsigned int hc = std::thread::hardware_concurrency();
+        if (hc >= 4) {
+            const double sweep_deg = (coverage_sector_enabled ? coverage_width_deg : 360.0);
+            const int estimated_points = estimate_los_sweep_points(max_range, sweep_deg, ippd);
+            const int min_points_per_segment = 12;
+            int tuned = estimated_points / min_points_per_segment;
+
+            if (tuned < 1)
+                tuned = 1;
+            if (estimated_points >= 16 && tuned < 4)
+                tuned = 4;
+
+            const int thread_cap = (int)hc * 2;
+            if (tuned > thread_cap)
+                tuned = thread_cap;
+            if (tuned > 64)
+                tuned = 64;
+
+            segments = tuned;
+            spdlog::info("    Auto-tuned LOS segments to {} for {} CPU threads and ~{} sweep points",
+                         segments, hc, estimated_points);
+        }
     }
 
     spdlog::info("-------------------------------- Plot Information --------------------------------");
@@ -1825,6 +1981,10 @@ int main(int argc, char *argv[])
     spdlog::info("    Plot parameters: {:.2f}-mile radius, resolution of {} ppd", max_range, ippd);
     spdlog::info("    Model parameters: {} MHz at {} W EIRP (dBd), {}% confidence", LR.frq_mhz, LR.erp, (uint8_t)(LR.conf * 100));
     spdlog::info("    Map segments: {}", segments);
+    if (coverage_sector_enabled)
+        spdlog::info("    LOS sector: {:.1f} deg centered at {:.1f} deg", coverage_width_deg, coverage_azimuth);
+    else
+        spdlog::info("    LOS sector: full 360 deg");
     if (metric)
         spdlog::info("    Metric mode");
     if (use_threads)
@@ -1899,7 +2059,7 @@ int main(int argc, char *argv[])
 
     /* Load the required tiles */
     if (lidar) {
-        if( (result = loadLIDAR(lidar_tiles, resample)) != 0 ){
+        if( (result = loadLIDAR(lidar_tiles, resample, &plot_bounds)) != 0 ){
             spdlog::error("Couldn't find one or more of the lidar files. Please ensure their paths are correct and try again.");
             spdlog::error("Error {}: {}", result, strerror(result));
             exit(result);
@@ -1921,6 +2081,16 @@ int main(int argc, char *argv[])
 
     } else {
         // DEM first
+        int max_pages_cap = MAXPAGES;
+        int estimated_pages = estimate_required_pages(plot_bounds, max_pages_cap);
+        if (estimated_pages < MAXPAGES) {
+            MAXPAGES = estimated_pages;
+            ARRAYSIZE = (MAXPAGES * IPPD) + 10;
+            spdlog::info("Estimated DEM pages: {} (cap {}). Reducing memory footprint.", MAXPAGES, max_pages_cap);
+        }
+        dem_alloc_rows = IPPD;
+        dem_alloc_cols = IPPD;
+        do_allocs();
 
         if( (result = LoadTopoData(plot_bounds)) != 0 ){
             // This only fails on errors loading SDF tiles
@@ -2037,7 +2207,27 @@ int main(int argc, char *argv[])
 
     if (ppa == 0) {
         if (prop_model == LOS) {  // Model 2 = LOS
-            cropping = false; // TODO: File is written in DoLOS() so this needs moving to PlotPropagation() to allow styling, cropping etc
+            // Keep LOS output centered on TX and constrained to requested radius.
+            bbox los_plot = getCircularBoundingBox({tx_site[0].lat, tx_site[0].lon}, max_range * KM_PER_MILE);
+            max_north = los_plot.upper_left.lat;
+            min_north = los_plot.lower_right.lat;
+            max_west = los_plot.upper_left.lon;
+            min_west = los_plot.lower_right.lon;
+            if (max_west < 0.0)
+                max_west += 360.0;
+            if (min_west < 0.0)
+                min_west += 360.0;
+
+            const double los_lon_span = fabs(LonDiff(max_west, min_west));
+            const double los_lat_span = fabs(max_north - min_north);
+            width = (int)ceil(los_lon_span * ppd);
+            height = (int)ceil(los_lat_span * ppd);
+            if (width < 1)
+                width = 1;
+            if (height < 1)
+                height = 1;
+
+            cropping = false; // LOS output is written in DoLOS().
             PlotLOSMap(tx_site[0], altitudeLR, ano_filename, use_threads, segments);
             DoLOS(mapfile, geo, kml, ngs, tx_site, txsites);
         } else {

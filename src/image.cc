@@ -13,13 +13,14 @@
 #include <dlfcn.h>
 #include "image.hh"
 #include "image-ppm.hh"
+#include "image-png.hh"
 
 int get_dt(image_dispatch_table_t *dt, int format);
 int load_library(image_dispatch_table_t *dt);
 
 #define DISPATCH_TABLE(ctx) ((image_dispatch_table_t*)(ctx)->_dt)
 
-static int default_format = IMAGE_PPM;
+static int default_format = IMAGE_PNG;
 char *dynamic_backend = NULL;
 
 /*
@@ -126,12 +127,26 @@ int image_write(image_ctx_t *ctx, FILE *fd){
 	if(ctx->initialized != 1) return EINVAL;
 	return DISPATCH_TABLE(ctx)->write(ctx,fd);
 }
+
+int image_set_geo_bounds(image_ctx_t *ctx, double n, double e, double s, double w){
+	if(ctx == NULL || ctx->initialized != 1)
+		return EINVAL;
+	ctx->north = n;
+	ctx->east = e;
+	ctx->south = s;
+	ctx->west = w;
+	ctx->has_geo_bounds = 1;
+	return 0;
+}
+
 void image_free(image_ctx_t *ctx){
 	if(ctx->initialized != 1) return;
 	if(DISPATCH_TABLE(ctx)->free != NULL){
 		DISPATCH_TABLE(ctx)->free(ctx);
 	}
 	if(ctx->canvas != NULL) free(ctx->canvas);
+	if(ctx->_dt != NULL) free(ctx->_dt);
+	memset(ctx,0x00,sizeof(image_ctx_t));
 }
 
 /*
@@ -144,6 +159,7 @@ int image_get_filename(image_ctx_t *ctx, char *out, size_t len_out, char *in){
 	size_t len_src;
 	size_t len_ext;
 	int success = 0;
+	char *dot;
 
 	if(ctx->initialized != 1)
 		return EINVAL;
@@ -166,6 +182,16 @@ int image_get_filename(image_ctx_t *ctx, char *out, size_t len_out, char *in){
 		else
 			success = ENOMEM;
 	}else if(len_src > len_ext){
+		dot = strrchr(in,'.');
+		if(dot != NULL && dot > in){
+			size_t len_base = (size_t)(dot - in);
+			if(len_base + len_ext < len_out){
+				strncpy(out,in,len_base);
+				out[len_base] = '\0';
+				strncat(out, ctx->extension, len_out - strlen(out) - 1);
+				return 0;
+			}
+		}
 		/* Doesn't have correct extension and fits */
 		if(len_src + len_ext < len_out){
 			strncpy(out,in,len_out);
@@ -193,6 +219,9 @@ int get_dt(image_dispatch_table_t *dt, int format){
 	switch(format){
 		case IMAGE_PPM:
 			*dt = ppm_dt;
+			break;
+		case IMAGE_PNG:
+			*dt = png_dt;
 			break;
 		case IMAGE_LIBRARY:
 			success = load_library(dt);
@@ -222,7 +251,7 @@ int image_set_library(char *library){
 	libname = (char*)calloc(length,sizeof(char));
 	if(libname == NULL)
 		return ENOMEM;
-	strncpy(libname,library,length);
+	memcpy(libname, library, length);
 
 	dynamic_backend = libname;
 	default_format = IMAGE_LIBRARY;

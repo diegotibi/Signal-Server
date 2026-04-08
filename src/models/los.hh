@@ -78,7 +78,7 @@ void PlotPropagation(struct site source, bbox bounds,
 /// @param plot_filename output plot filename
 /// @param prop_model propagation model to use
 /// @param use_threads whether to use multithreading
-/// @param segments segments to split the plot circle into (must be a multiple of 2 or 3)
+/// @param segments angular worker segments to split the plot circle into
 void PlotPropagationRadius(struct site source, double range, 
                             double altitude, char *plot_filename, 
                             PropModel prop_model, int knifeedge, int haf, int pmenv, 

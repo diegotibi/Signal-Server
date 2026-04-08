@@ -79,8 +79,7 @@ int loadClutter(char *filename, double radius, struct site tx)
 
 	s = fgets(line, 25, fd);  // cellsize
 
-	if (s)
-		;
+	(void)s;
 
 	// loop over matrix
 	for (y = h; y > 0; y--) {
@@ -140,6 +139,8 @@ int loadClutter(char *filename, double radius, struct site tx)
 
 int averageHeight(int height, int width, int x, int y)
 {
+	(void)height;
+	(void)width;
 	int total = 0;
 	int c = 0;
 	if (dem[0].data[y - 1][x - 1] > 0) {
@@ -167,13 +168,28 @@ int averageHeight(int height, int width, int x, int y)
 	}
 }
 
-int loadLIDAR(char *filenames, int resample)
+int loadLIDAR(char *filenames, int resample, const bbox *region)
 {
+	struct tile_view {
+		int include;
+		size_t row_start;
+		size_t row_end;
+		size_t col_start;
+		size_t col_end;
+		double max_north;
+		double min_north;
+		double max_west;
+		double min_west;
+	};
+
 	char *filename;
 	char *files[900];  // 20x20=400, 16x16=256 tiles
 	int indx = 0, fc = 0, success;
 	double avgCellsize = 0, smCellsize = 0;
 	tile_t *tiles;
+	tile_view *views = NULL;
+	int view_count = 0;
+	const int use_clip = (region != NULL);
 
 	// Initialize global variables before processing files
 	min_west = 361;  // any value will be lower than this
@@ -195,12 +211,13 @@ int loadLIDAR(char *filenames, int resample)
 
 	/* Load each tile in turn */
 	for (indx = 0; indx < fc; indx++) {
-		/* Grab the tile metadata */
-		if ((success = tile_load_lidar(&tiles[indx], files[indx])) != 0) {
-			spdlog::error("Failed to load LIDAR tile {}", files[indx]);
-			free(tiles);
-			return success;
-		}
+			/* Grab the tile metadata */
+			if ((success = tile_load_lidar(&tiles[indx], files[indx])) != 0) {
+				spdlog::error("Failed to load LIDAR tile {}", files[indx]);
+				for (int k = 0; k < indx; k++) tile_destroy(&tiles[k]);
+				free(tiles);
+				return success;
+			}
 
 		spdlog::debug("Loading \"{}\" into page {} with width {}...", files[indx], indx, tiles[indx].width);
 
@@ -211,30 +228,9 @@ int loadLIDAR(char *filenames, int resample)
 			smCellsize = tiles[indx].cellsize;
 		}
 
-		// Update a bunch of globals
-		if (tiles[indx].max_el > max_elevation) max_elevation = tiles[indx].max_el;
-		if (tiles[indx].min_el < min_elevation) min_elevation = tiles[indx].min_el;
-
-		if (max_north == -90 || tiles[indx].max_north > max_north) max_north = tiles[indx].max_north;
-
-		if (min_north == 90 || tiles[indx].min_north < min_north) min_north = tiles[indx].min_north;
-
-		// Meridian switch. max_west=0
-		if (abs(tiles[indx].max_west - max_west) < 180 || tiles[indx].max_west < 360) {
-			if (tiles[indx].max_west > max_west) max_west = tiles[indx].max_west;  // update highest value
+			if (tiles[indx].max_el > max_elevation) max_elevation = tiles[indx].max_el;
+			if (tiles[indx].min_el < min_elevation) min_elevation = tiles[indx].min_el;
 		}
-		else {
-			if (tiles[indx].max_west < max_west) max_west = tiles[indx].max_west;
-		}
-		if (fabs(tiles[indx].min_west - min_west) < 180.0 || tiles[indx].min_west <= 360) {
-			if (tiles[indx].min_west < min_west) min_west = tiles[indx].min_west;
-		}
-		else {
-			if (tiles[indx].min_west > min_west) min_west = tiles[indx].min_west;
-		}
-		// Handle tile with 360 XUR
-		if (min_west > 359) min_west = 0.0;
-	}
 
 	/* Iterate through all of the tiles to find the smallest resolution. We will
 	 * need to rescale every tile from here on out to this value */
@@ -259,12 +255,97 @@ int loadLIDAR(char *filenames, int resample)
 			float rescale = tiles[i].resolution / (float)desired_resolution;
 			spdlog::debug("res {:.5f} desired_res {:.5f}", tiles[i].resolution, (float)desired_resolution);
 			if (rescale != 1) {
-				if ((success = tile_rescale(&tiles[i], rescale) != 0)) {
+				if ((success = tile_rescale(&tiles[i], rescale)) != 0) {
 					spdlog::error("Error resampling tiles");
+					for (indx = 0; indx < fc; indx++) tile_destroy(&tiles[indx]);
+					free(tiles);
 					return success;
 				}
 			}
 		}
+	}
+
+	views = (tile_view *)calloc(fc, sizeof(tile_view));
+	if (views == NULL) {
+		free(tiles);
+		return ENOMEM;
+	}
+
+	max_north = -90;
+	min_north = 90;
+	min_west = 361;
+	max_west = 0;
+
+	for (size_t i = 0; i < (unsigned)fc; i++) {
+		double use_max_north = tiles[i].max_north;
+		double use_min_north = tiles[i].min_north;
+		double use_max_west = tiles[i].max_west;
+		double use_min_west = tiles[i].min_west;
+
+		if (use_clip) {
+			if (use_max_north > region->upper_left.lat)
+				use_max_north = region->upper_left.lat;
+			if (use_min_north < region->lower_right.lat)
+				use_min_north = region->lower_right.lat;
+			if (use_max_west > region->upper_left.lon)
+				use_max_west = region->upper_left.lon;
+			if (use_min_west < region->lower_right.lon)
+				use_min_west = region->lower_right.lon;
+		}
+
+		if (use_max_north <= use_min_north || use_max_west <= use_min_west)
+			continue;
+
+		size_t row_start = (size_t)floor((tiles[i].max_north - use_max_north) * tiles[i].ppdy + 1e-9);
+		size_t row_end = (size_t)ceil((tiles[i].max_north - use_min_north) * tiles[i].ppdy - 1e-9);
+		size_t col_start = (size_t)floor((tiles[i].max_west - use_max_west) * tiles[i].ppdx + 1e-9);
+		size_t col_end = (size_t)ceil((tiles[i].max_west - use_min_west) * tiles[i].ppdx - 1e-9);
+
+		if (row_end > (size_t)tiles[i].height)
+			row_end = (size_t)tiles[i].height;
+		if (col_end > (size_t)tiles[i].width)
+			col_end = (size_t)tiles[i].width;
+		if (row_start >= row_end || col_start >= col_end)
+			continue;
+
+		use_max_north = tiles[i].max_north - ((double)row_start / tiles[i].ppdy);
+		use_min_north = tiles[i].max_north - ((double)row_end / tiles[i].ppdy);
+		use_max_west = tiles[i].max_west - ((double)col_start / tiles[i].ppdx);
+		use_min_west = tiles[i].max_west - ((double)col_end / tiles[i].ppdx);
+
+		views[i].include = 1;
+		views[i].row_start = row_start;
+		views[i].row_end = row_end;
+		views[i].col_start = col_start;
+		views[i].col_end = col_end;
+		views[i].max_north = use_max_north;
+		views[i].min_north = use_min_north;
+		views[i].max_west = use_max_west;
+		views[i].min_west = use_min_west;
+		view_count++;
+
+		if (max_north == -90 || use_max_north > max_north) max_north = use_max_north;
+		if (min_north == 90 || use_min_north < min_north) min_north = use_min_north;
+
+		if (fabs(use_max_west - max_west) < 180 || use_max_west < 360) {
+			if (use_max_west > max_west) max_west = use_max_west;
+		} else {
+			if (use_max_west < max_west) max_west = use_max_west;
+		}
+		if (fabs(use_min_west - min_west) < 180.0 || use_min_west <= 360) {
+			if (use_min_west < min_west) min_west = use_min_west;
+		} else {
+			if (use_min_west > min_west) min_west = use_min_west;
+		}
+		if (min_west > 359) min_west = 0.0;
+	}
+
+	if (view_count == 0) {
+		spdlog::error("No LIDAR tiles overlap the requested plot bounds");
+		free(views);
+		for (indx = 0; indx < fc; indx++) tile_destroy(&tiles[indx]);
+		free(tiles);
+		return ENOENT;
 	}
 
 	/* Now we work out the size of the giant lidar tile. */
@@ -278,7 +359,7 @@ int loadLIDAR(char *filenames, int resample)
 
 	// detect problematic layouts eg. vertical rectangles
 	//  1x2
-	if (fc >= 2 && desired_resolution < 28 && total_height > total_width * 1.5) {
+	if (!use_clip && fc >= 2 && desired_resolution < 28 && total_height > total_width * 1.5) {
 		tiles[fc].max_north = max_north;
 		tiles[fc].min_north = min_north;
 		westoffset = westoffset - (total_height - total_width);  // WGS84 for stdout only
@@ -299,7 +380,7 @@ int loadLIDAR(char *filenames, int resample)
 									(float)desired_resolution);
 	}
 	// 2x1
-	if (fc >= 2 && desired_resolution < 28 && total_width > total_height * 1.5) {
+	if (!use_clip && fc >= 2 && desired_resolution < 28 && total_width > total_height * 1.5) {
 		tiles[fc].max_north = max_north + (total_width - total_height);
 		tiles[fc].min_north = max_north;
 		tiles[fc].max_west = max_west;                         // Positive westing
@@ -320,14 +401,18 @@ int loadLIDAR(char *filenames, int resample)
 	size_t new_height = 0;
 	size_t new_width = 0;
 	for (size_t i = 0; i < (unsigned)fc; i++) {
-		double north_offset = max_north - tiles[i].max_north;
+		if (!views[i].include)
+			continue;
+		double north_offset = max_north - views[i].max_north;
 		double west_offset =
-				max_west - tiles[i].max_west >= 0 ? max_west - tiles[i].max_west : max_west + (360 - tiles[i].max_west);
+				max_west - views[i].max_west >= 0 ? max_west - views[i].max_west : max_west + (360 - views[i].max_west);
 		size_t north_pixel_offset = north_offset * tiles[i].ppdy;
 		size_t west_pixel_offset = west_offset * tiles[i].ppdx;
+		size_t view_width = views[i].col_end - views[i].col_start;
+		size_t view_height = views[i].row_end - views[i].row_start;
 
-		if (west_pixel_offset + tiles[i].width > new_width) new_width = west_pixel_offset + tiles[i].width;
-		if (north_pixel_offset + tiles[i].height > new_height) new_height = north_pixel_offset + tiles[i].height;
+		if (west_pixel_offset + view_width > new_width) new_width = west_pixel_offset + view_width;
+		if (north_pixel_offset + view_height > new_height) new_height = north_pixel_offset + view_height;
 
 		spdlog::debug("north_pixel_offset {} west_pixel_offset {}, {} x {}", north_pixel_offset, west_pixel_offset, new_height,
 									new_width);
@@ -344,6 +429,8 @@ int loadLIDAR(char *filenames, int resample)
 
 	if (new_tile == NULL) {
 		spdlog::error("Could not allocate {} bytes", new_tile_alloc);
+		free(views);
+		for (indx = 0; indx < fc; indx++) tile_destroy(&tiles[indx]);
 		free(tiles);
 		return ENOMEM;
 	}
@@ -355,28 +442,32 @@ int loadLIDAR(char *filenames, int resample)
 
 	/* Fill out the array one tile at a time */
 	for (size_t i = 0; i < (unsigned)fc; i++) {
-		double north_offset = max_north - tiles[i].max_north;
+		if (!views[i].include)
+			continue;
+		double north_offset = max_north - views[i].max_north;
 		double west_offset =
-				max_west - tiles[i].max_west >= 0 ? max_west - tiles[i].max_west : max_west + (360 - tiles[i].max_west);
+				max_west - views[i].max_west >= 0 ? max_west - views[i].max_west : max_west + (360 - views[i].max_west);
 		size_t north_pixel_offset = north_offset * tiles[i].ppdy;
 		size_t west_pixel_offset = west_offset * tiles[i].ppdx;
+		size_t view_width = views[i].col_end - views[i].col_start;
+		size_t view_height = views[i].row_end - views[i].row_start;
 
 		spdlog::debug("mn: {} mw: {} globals: {} {}", tiles[i].max_north, tiles[i].max_west, max_north, max_west);
 		spdlog::debug("Offset n:{} ({}) w:{} ({})", north_pixel_offset, north_offset, west_pixel_offset, west_offset);
-		spdlog::debug("Height: {}", tiles[i].height);
+		spdlog::debug("Height: {}", view_height);
 
 		/* Copy it row-by-row from the tile */
-		for (size_t h = 0; h < (unsigned)tiles[i].height; h++) {
-			register short *dest_addr = &new_tile[(north_pixel_offset + h) * new_width + west_pixel_offset];
-			register short *src_addr = &tiles[i].data[h * tiles[i].width];
+		for (size_t h = 0; h < view_height; h++) {
+			short *dest_addr = &new_tile[(north_pixel_offset + h) * new_width + west_pixel_offset];
+			short *src_addr = &tiles[i].data[(views[i].row_start + h) * tiles[i].width + views[i].col_start];
 			// Check if we might overflow
-			if (dest_addr + tiles[i].width > new_tile + new_tile_alloc || dest_addr < new_tile) {
+			if (dest_addr + view_width > new_tile + new_tile_alloc || dest_addr < new_tile) {
 				if (debug) {
 					spdlog::error("Overflow {}", i);
 				}
 				continue;
 			}
-			memcpy(dest_addr, src_addr, tiles[i].width * sizeof(short));
+			memcpy(dest_addr, src_addr, view_width * sizeof(short));
 		}
 	}
 
@@ -384,6 +475,8 @@ int loadLIDAR(char *filenames, int resample)
 	MAXPAGES = 1;
 	IPPD = MAX(new_width, new_height);
 	ippd = IPPD;
+    dem_alloc_rows = (int)new_height;
+    dem_alloc_cols = (int)new_width;
 
 	ARRAYSIZE = (MAXPAGES * IPPD) + 10;
 	do_allocs();
@@ -410,7 +503,8 @@ int loadLIDAR(char *filenames, int resample)
 		int x = new_width - 1;
 		for (size_t w = 0; w < new_width; w++, x--) {
 			dem[0].data[y][x] = new_tile[h * new_width + w];
-			dem[0].signal[y][x] = 0;
+            if (dem[0].signal != NULL)
+                dem[0].signal[y][x] = 0;
 			dem[0].mask[y][x] = 0;
 		}
 	}
@@ -435,7 +529,8 @@ int loadLIDAR(char *filenames, int resample)
 								width, height, ippd, min_north, max_north, min_west, max_west, avgCellsize);
 
 	if (tiles != NULL)
-		for (size_t i = 0; i < (unsigned)fc - 1; i++) tile_destroy(&tiles[i]);
+		for (size_t i = 0; i < (unsigned)fc; i++) tile_destroy(&tiles[i]);
+	free(views);
 	free(tiles);
 
 	return 0;
@@ -537,7 +632,8 @@ int LoadSDF_SDF(char *name)
 				}
 
 				dem[indx].data[x][y] = data;
-				dem[indx].signal[x][y] = 0;
+                if (dem[indx].signal != NULL)
+                    dem[indx].signal[x][y] = 0;
 				dem[indx].mask[x][y] = 0;
 
 				if (data > dem[indx].max_el) dem[indx].max_el = data;
@@ -769,7 +865,8 @@ int LoadSDF_BZ(char *name)
 				data = atoi(line);
 
 				dem[indx].data[x][y] = data;
-				dem[indx].signal[x][y] = 0;
+                if (dem[indx].signal != NULL)
+                    dem[indx].signal[x][y] = 0;
 				dem[indx].mask[x][y] = 0;
 
 				if (data > dem[indx].max_el) dem[indx].max_el = data;
@@ -1034,7 +1131,8 @@ int LoadSDF_GZ(char *name)
                 data = atoi(line);
 
                 dem[indx].data[x][y] = data;
-                dem[indx].signal[x][y] = 0;
+                if (dem[indx].signal != NULL)
+                    dem[indx].signal[x][y] = 0;
                 dem[indx].mask[x][y] = 0;
 
                 if (data > dem[indx].max_el) dem[indx].max_el = data;
@@ -1182,7 +1280,8 @@ int LoadSDF(char *name)
 			for (x = 0; x < ippd; x++)
 				for (y = 0; y < ippd; y++) {
 					dem[indx].data[x][y] = 0;
-					dem[indx].signal[x][y] = 0;
+                    if (dem[indx].signal != NULL)
+                        dem[indx].signal[x][y] = 0;
 					dem[indx].mask[x][y] = 0;
 
 					if (dem[indx].min_el > 0) dem[indx].min_el = 0;
@@ -1685,8 +1784,7 @@ int LoadSignalColors(struct site xmtr)
 		x = 0;
 		s = fgets(string, 80, fd);
 
-		if (s)
-			;
+			(void)s;
 
 		while (x < 128 && feof(fd) == 0) {
 			pointer = strchr(string, ';');
@@ -1847,8 +1945,7 @@ int LoadLossColors(struct site xmtr)
 		x = 0;
 		s = fgets(string, 80, fd);
 
-		if (s)
-			;
+			(void)s;
 
 		while (x < 128 && feof(fd) == 0) {
 			pointer = strchr(string, ';');
@@ -1999,8 +2096,7 @@ int LoadDBMColors(struct site xmtr)
 		x = 0;
 		s = fgets(string, 80, fd);
 
-		if (s)
-			;
+			(void)s;
 
 		while (x < 128 && feof(fd) == 0) {
 			pointer = strchr(string, ';');
@@ -2076,7 +2172,7 @@ int LoadTopoData(bbox region)
             spdlog::debug("Loading topo for tile {}N {}W to {}N {}W", tile_lat, tile_lon, tile_lat + 1, tile_lon + 1);
             // Generate the filename string to load
             char basename[32], string[32];
-            snprintf(basename, 16, "%d_%d_%d_%d", tile_lat, tile_lat + 1, tile_lon, tile_lon + 1);
+            snprintf(basename, sizeof(basename), "%d_%d_%d_%d", tile_lat, tile_lat + 1, tile_lon, tile_lon + 1);
             strcpy(string, basename);
             if (ippd == 3600) strcat(string, "-hd");
             // Load the tile
@@ -2120,8 +2216,7 @@ int LoadUDT(char *filename)
 
 	s = fgets(input, 78, fd1);
 
-	if (s)
-		;
+	(void)s;
 
 	pointer = strchr(input, ';');
 
@@ -2199,8 +2294,7 @@ int LoadUDT(char *filename)
 
 	n = fscanf(fd1, "%d, %d, %lf", &xpix, &ypix, &height);
 
-	if (n)
-		;
+	(void)n;
 
 	do {
 		x = 0;

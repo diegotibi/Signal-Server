@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <string.h>
 #include <math.h>
+#include <climits>
 #include "tiles.hh"
 #include "common.hh"
 
@@ -163,7 +164,7 @@ int tile_rescale(tile_t *tile, float scale){
 	}
 
 	tile->max_el = -32768;
-	tile->min_el = 32768;
+	tile->min_el = SHRT_MAX;
 
 	/* Making the tile data smaller */
 	if (scale < 1) {
@@ -243,4 +244,3 @@ void tile_destroy(tile_t* tile){
 	if (tile->data != NULL)
 		free(tile->data);
 }
-

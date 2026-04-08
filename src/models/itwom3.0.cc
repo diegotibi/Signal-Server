@@ -44,6 +44,7 @@
 #include <complex>
 #include <assert.h>
 #include <string.h>
+#include <vector>
 
 #include "../common.hh"
 
@@ -258,6 +259,7 @@ double abq_alos(complex < double >r)
 
 double saalos(double d, prop_type & prop, propa_type & propa)
 {
+	(void)propa;
 	double ensa, encca, q, dp, dx, tde, hc, ucrpc, ctip, tip, tic, stic,
 	    ctic, sta;
 	double ttc, cttc, crpc, ssnps, d1a, rsp, tsp, arte, zi, pd, pdk, hone,
@@ -514,8 +516,7 @@ double adiff2(double d, prop_type & prop, propa_type & propa)
 {
 	complex < double >prop_zgnd(prop.zgndreal, prop.zgndimag);
 	static __thread double wd1, xd1, qk, aht, xht, toh, toho, roh, roho, dto, dto1,
-	    dtro, dro, dro2, drto, dtr, dhh1, dhh2, /* dhec, */ dtof, dto1f,
-	    drof, dro2f;
+	    dtro, dro, dro2, drto, dtr, dhh1, dhh2, /* dhec, */ dtof, dto1f, drof, dro2f;
 	double a, q, pk, rd, ds, dsl, /* dfdh, */ th, wa, /* ar, wd, sf1, */
 	    sf2, /* ec, */ vv, kedr = 0.0, arp = 0.0, sdr = 0.0, pd = 0.0, srp =
 	    0.0, kem = 0.0, csd = 0.0, sdl = 0.0, adiffv2 = 0.0, closs = 0.0;
@@ -639,6 +640,8 @@ double adiff2(double d, prop_type & prop, propa_type & propa)
 		    sqrt(prop.dl[1] * prop.dl[1] +
 			 (roho - prop.cch) * (roho - prop.cch));
 		dro2f += prop.gme * (prop.dl[1]);
+		(void)dto1f;
+		(void)dro2f;
 
 		/* saalos coefficients preset for post-obstacle receive path */
 		prop.tgh = prop.cch + 1.0;
@@ -1687,6 +1690,7 @@ double avar(double zzt, double zzl, double zzc, prop_type & prop,
 			cfp1 = bfp1[temp_klim];
 			cfp2 = bfp2[temp_klim];
 			cfp3 = bfp3[temp_klim];
+			/* fall through */
 
 		case 4:
 			kdv = propv.mdvar;
@@ -1704,6 +1708,7 @@ double avar(double zzt, double zzl, double zzc, prop_type & prop,
 				kdv = 0;
 				prop.kwx = mymax(prop.kwx, 2);
 			}
+			/* fall through */
 
 		case 3:
 			q = log(0.133 * prop.wn);
@@ -1713,11 +1718,13 @@ double avar(double zzt, double zzl, double zzc, prop_type & prop,
 
 			gm = cfm1 + cfm2 / ((cfm3 * q * cfm3 * q) + 1.0);
 			gp = cfp1 + cfp2 / ((cfp3 * q * cfp3 * q) + 1.0);
+			/* fall through */
 
 		case 2:
 			dexa =
 			    sqrt(18e6 * prop.he[0]) + sqrt(18e6 * prop.he[1]) +
 			    pow((575.7e12 / prop.wn), THIRD);
+			/* fall through */
 
 		case 1:
 			if (prop.dist < dexa)
@@ -1869,6 +1876,7 @@ void hzns(double pfl[], prop_type & prop)
 
 void hzns2(double pfl[], prop_type & prop, propa_type & propa)
 {
+	(void)propa;
 	bool wq;
 	int np, rp, i, j;
 	double xi, za, zb, qc, q, sb, sa, dr, dshh;
@@ -2125,7 +2133,8 @@ double d1thx(double pfl[], const double &x1, const double &x2)
 {
 	int np, ka, kb, n, k, j;
 	double d1thxv, sn, xa, xb;
-	double *s;
+	std::vector<double> s_buf;
+	double *s = NULL;
 
 	np = (int)pfl[0];
 	xa = x1 / pfl[1];
@@ -2140,7 +2149,8 @@ double d1thx(double pfl[], const double &x1, const double &x2)
 	n = 10 * ka - 5;
 	kb = n - ka + 1;
 	sn = n - 1;
-	assert((s = new double[n + 2])!=0);
+	s_buf.resize(n + 2);
+	s = s_buf.data();
 	s[0] = sn;
 	s[1] = 1.0;
 	xb = (xb - xa) / sn;
@@ -2167,17 +2177,17 @@ double d1thx(double pfl[], const double &x1, const double &x2)
 
 	d1thxv = qtile(n - 1, s + 2, ka - 1) - qtile(n - 1, s + 2, kb - 1);
 	d1thxv /= 1.0 - 0.8 * exp(-(x2 - x1) / 50.0e3);
-	delete[]s;
-
 	return d1thxv;
 }
 
 double d1thx2(double pfl[], const double &x1, const double &x2,
 	      propa_type & propa)
 {
+	(void)propa;
 	int np, ka, kb, n, k, kmx, j;
 	double d1thx2v, sn, xa, xb, xc;
-	double *s;
+	std::vector<double> s_buf;
+	double *s = NULL;
 
 	np = (int)pfl[0];
 	xa = x1 / pfl[1];
@@ -2193,7 +2203,8 @@ double d1thx2(double pfl[], const double &x1, const double &x2,
 	n = 10 * ka - 5;
 	kb = n - ka + 1;
 	sn = n - 1;
-	assert((s = new double[n + 2])!=0);
+	s_buf.resize(n + 2);
+	s = s_buf.data();
 	s[0] = sn;
 	s[1] = 1.0;
 	xb = (xb - xa) / sn;
@@ -2220,7 +2231,6 @@ double d1thx2(double pfl[], const double &x1, const double &x2,
 
 	d1thx2v = qtile(n - 1, s + 2, ka - 1) - qtile(n - 1, s + 2, kb - 1);
 	d1thx2v /= 1.0 - 0.8 * exp(-(x2 - x1) / 50.0e3);
-	delete[]s;
 	return d1thx2v;
 }
 
@@ -2306,7 +2316,7 @@ void qlrpfl2(double pfl[], int klimx, int mdvarx, prop_type & prop,
 	     propa_type & propa, propv_type & propv)
 {
 	int np, j;
-	double xl[2], dlb, q, za, zb, temp, rad, rae1, rae2;
+	double xl[2], dlb, q = 1.0, za, zb, temp, rad, rae1, rae2;
 
 	prop.dist = pfl[0] * pfl[1];
 	np = (int)pfl[0];
@@ -2691,6 +2701,7 @@ void point_to_pointMDH_two(double tht_m, double rht_m, double eps_dielect,
 	                          Results are probably invalid.
 *************************************************************************************************/
 {
+	(void)mode_var;
 
 	prop_type prop;
 	propv_type propv;
@@ -2788,6 +2799,7 @@ void point_to_pointDH(double tht_m, double rht_m, double eps_dielect,
 	                          Results are probably invalid.
 *************************************************************************************************/
 {
+	(void)loc;
 
 	char strmode[100];
 	prop_type prop;
@@ -2870,6 +2882,8 @@ void area(long ModVar, double deltaH, double tht_m, double rht_m,
 	  int mode_var, double pctTime, double pctLoc, double pctConf,
 	  double &dbloss, char *strmode, int &errnum)
 {
+	(void)mode_var;
+	(void)strmode;
 	// pol: 0-Horizontal, 1-Vertical
 	// TSiteCriteria, RSiteCriteria:
 	//                 0 - random, 1 - careful, 2 - very careful

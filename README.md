@@ -32,7 +32,7 @@ WARNING: The accuracy of the output is directly proportional to the accuracy of 
 
 Signal Server is a very resource intensive multicore application. Only publish it for common use if you know what you are doing and you are advised to wrap it with another script to perform input validation.
 
-Additional programs/scripts will be required to prepare inputs such as .hgt tiles (srtm2sdf.c), 3D antenna patterns (.ant) and user defined clutter (.udt) or manipulate the bitmap output (.ppm). More information can be found in the SPLAT! project.
+Additional programs/scripts will be required to prepare inputs such as .hgt tiles (srtm2sdf.c), 3D antenna patterns (.ant) and user defined clutter (.udt). More information can be found in the SPLAT! project.
 
 ## File extensions and types used by signalserver:
 ```
@@ -52,8 +52,8 @@ Additional programs/scripts will be required to prepare inputs such as .hgt tile
 .lrp LIDAR antenna pattern data file
 .udt user defined terrain data clutter data text file
 .sh  miscellaneous shell scripts and batch files
-.ppm portable pixmap - output plot graphic rendering (native)
-.png portable network graphics - output plot graphic rendering (converted)
+.ppm portable pixmap - output plot graphic rendering (legacy/optional backend)
+.png portable network graphics - output plot graphic rendering (native default)
 .kml Google Earth Keyhole Markup Language - output viewable with Google Earth
 .kmz Google Earth Keyhole Markup Language, compressed
 ```
@@ -121,7 +121,7 @@ Input:
      -rel Reliability for ITM model (% of 'time') 1 to 99 (optional, default 50%)
      -conf Confidence for ITM model (% of 'situations') 1 to 99 (optional, default 50%)
      -resample Reduce Lidar resolution by specified factor (2 = 50%)
-     -segments Number of segments to divide the plot rectangle into (must be even and > 4)
+     -segments Number of angular worker segments for LOS/radial processing (>= 1)
 Output:
      -o basename (Output file basename - required, min 5 chars)
      -dbm Plot Rxd signal power instead of field strength in dBuV/m
@@ -140,6 +140,7 @@ Antenna:
      -rxg Rx gain dBd (optional for PPA text report)
      -hp Horizontal Polarisation (default=vertical)
      -rot  (  0.0 - 359.0 degrees, default 0.0) Antenna Pattern Rotation
+     -beam LOS sector width in degrees centered on -rot (default 360)
      -dt   ( -10.0 - 90.0 degrees, default 0.0) Antenna Downtilt
      -dtdir ( 0.0 - 359.0 degrees, default 0.0) Antenna Downtilt Direction
 Debugging:
@@ -253,4 +254,3 @@ cd output/GoogleEarth
 cd output/GoogleEarth
 ./runsig.sh -lat 42.428889 -lon -87.812500 -txh 300 -f 446.000 -erp 700 -R 150 -res 600 -rel 10 -rt 21 -ant ../../antenna/DB413-B -rot 225 -color ../../color/blue -o example-interference | ./genkmz.sh
 ```
-

@@ -8,6 +8,7 @@
 
 enum _image_format{	IMAGE_DEFAULT = 0, \
 					IMAGE_PPM, \
+					IMAGE_PNG, \
 					IMAGE_LIBRARY, \
 					IMAGE_FORMAT_MAX \
 				};
@@ -25,8 +26,13 @@ typedef struct _image_ctx{
 	uint8_t *canvas;
 	uint8_t *next_pixel;
 	uint32_t initialized;
+	uint32_t has_geo_bounds;
 	char *extension;
 	void *_dt;
+	double north;
+	double east;
+	double south;
+	double west;
 } image_ctx_t, *pimage_ctx_t;
 
 typedef int _init(image_ctx_t*);
@@ -54,6 +60,7 @@ int image_get_filename(image_ctx_t*, char*, size_t, char*);
 int image_write(image_ctx_t*, FILE*);
 void image_free(image_ctx_t*);
 int image_set_library(char*);
+int image_set_geo_bounds(image_ctx_t*, double, double, double, double);
 
 #define ADD_PIXEL(ctx,r,g,b) image_add_pixel((ctx),(r),(g),(b),0xff)
 #define ADD_PIXELA(ctx,r,g,b,a) image_add_pixel((ctx),(r),(g),(b),(a))

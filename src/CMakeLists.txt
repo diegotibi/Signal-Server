@@ -39,6 +39,7 @@ include_directories(models)
 # internal libraries
 add_library(image STATIC image.cc)
 add_library(image-ppm STATIC image-ppm.cc)
+add_library(image-png STATIC image-png.cc)
 add_library(inputs STATIC inputs.cc)
 add_library(outputs STATIC outputs.cc)
 add_library(tiles STATIC tiles.cc)
@@ -61,6 +62,13 @@ find_library(bz2 bz2)
 find_library(dl dl)
 find_library(pthread pthread)
 find_library(z z)
+find_package(PNG REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PNGPKG REQUIRED libpng)
+
+target_include_directories(image-png PRIVATE ${PNGPKG_INCLUDE_DIRS})
+target_link_directories(image-png PRIVATE ${PNGPKG_LIBRARY_DIRS})
+target_link_libraries(image-png PUBLIC ${PNGPKG_LIBRARIES})
 
 # Spdlog
 find_package(spdlog REQUIRED)
@@ -90,6 +98,7 @@ target_compile_definitions(
 target_link_libraries(signalserver 
 			PUBLIC image
 			PUBLIC image-ppm
+			PUBLIC image-png
 			PUBLIC inputs
 			PUBLIC outputs
 			PUBLIC tiles
@@ -108,6 +117,7 @@ target_link_libraries(signalserver
 			PUBLIC dl
 			PUBLIC pthread
 			PUBLIC z
+			PUBLIC PNG::PNG
             PUBLIC spdlog::spdlog
             PUBLIC geo
 		  )
@@ -115,6 +125,7 @@ target_link_libraries(signalserver
 target_link_libraries(signalserverHD 
 			PUBLIC image
 			PUBLIC image-ppm
+			PUBLIC image-png
 			PUBLIC inputs
 			PUBLIC outputs
 			PUBLIC tiles
@@ -133,6 +144,7 @@ target_link_libraries(signalserverHD
 			PUBLIC dl
 			PUBLIC pthread
 			PUBLIC z
+			PUBLIC PNG::PNG
             PUBLIC spdlog::spdlog
             PUBLIC geo
 		  )
@@ -140,6 +152,7 @@ target_link_libraries(signalserverHD
 target_link_libraries(signalserverLIDAR 
 			PUBLIC image
 			PUBLIC image-ppm
+			PUBLIC image-png
 			PUBLIC inputs
 			PUBLIC outputs
 			PUBLIC tiles
@@ -158,6 +171,7 @@ target_link_libraries(signalserverLIDAR
 			PUBLIC dl
 			PUBLIC pthread
 			PUBLIC z
+			PUBLIC PNG::PNG
             PUBLIC spdlog::spdlog
             PUBLIC geo
 		  )
@@ -166,4 +180,3 @@ target_link_libraries(signalserverLIDAR
 install(TARGETS signalserver)
 install(TARGETS signalserverHD)
 install(TARGETS signalserverLIDAR)
-

@@ -21,9 +21,35 @@
 #include "models/sui.hh"
 #include "image.hh"
 
+namespace {
+inline bool map_to_dem_indices(double lat, double lon, int &indx, int &x0, int &y0)
+{
+    if (MAXPAGES == 1) {
+        indx = 0;
+        x0 = (int)rint(ppd * (lat - (double)dem[0].min_north));
+        y0 = mpi - (int)rint(ppd * (LonDiff((double)dem[0].max_west, lon)));
+        return DemPointInBounds(0, x0, y0);
+    }
+
+    unsigned char found = 0;
+    for (indx = 0; indx < MAXPAGES && found == 0;) {
+        x0 = (int)rint(ppd * (lat - (double)dem[indx].min_north));
+        y0 = mpi - (int)rint(ppd * (LonDiff((double)dem[indx].max_west, lon)));
+
+        if (DemPointInBounds(indx, x0, y0))
+            found = 1;
+        else
+            indx++;
+    }
+    return (found != 0);
+}
+}
+
 void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
 		unsigned char ngs, struct site *xmtr, unsigned char txsites)
 {
+	(void)geo;
+	(void)txsites;
 	/* This function generates a topographic map in Portable Pix Map
 	   (PPM) format based on the content of flags held in the mask[][]
 	   array (only).  The image created is rotated counter-clockwise
@@ -38,7 +64,6 @@ void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
 	FILE *fd;
 	image_ctx_t ctx;
 	int success;
-
 	if( (success = image_init(&ctx, width, (kml ? height : height + 30), IMAGE_RGB, IMAGE_DEFAULT)) != 0 ){
 		spdlog::error("Error initializing image: {}", strerror(success));
 		exit(success);
@@ -56,10 +81,10 @@ void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
 
 	if( filename != NULL ) {
 
-		if (filename[0] == 0) {
-			strncpy(filename, xmtr[0].filename, 254);
-			filename[strlen(filename) - 4] = 0;	/* Remove .qth */
-		}
+			if (filename[0] == 0) {
+				snprintf(filename, 255, "%s", xmtr[0].filename);
+				filename[strlen(filename) - 4] = 0;	/* Remove .qth */
+			}
 
 		if(image_get_filename(&ctx,mapfile,sizeof(mapfile),filename) != 0){
 			spdlog::error("Error creating file name");
@@ -89,6 +114,7 @@ void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
 
 	east = (minwest < 180.0 ? -minwest : 360.0 - min_west);
 	west = (double)(max_west < 180 ? -max_west : 360 - max_west);
+	image_set_geo_bounds(&ctx, (double)max_north, east, (double)min_north, west);
 
 	spdlog::debug("Writing \"{}\" ({} x {} pixmap image)...",
 			filename != NULL ? mapfile : "to stdout", width, (kml ? height : height + 30));
@@ -118,8 +144,7 @@ void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
                                 }*/
 
 
-				if (x0 >= 0 && x0 <= mpi && y0 >= 0
-				    && y0 <= mpi)
+				if (DemPointInBounds(indx, x0, y0))
 					found = 1;
 				else
 					indx++;
@@ -264,6 +289,8 @@ void DoPathLoss(char *filename, unsigned char geo, unsigned char kml,
 int DoSigStr(char *filename, unsigned char geo, unsigned char kml,
 	      unsigned char ngs, struct site *xmtr, unsigned char txsites)
 {
+	(void)geo;
+	(void)txsites;
 	/* This function generates a topographic map in Portable Pix Map
 	   (PPM) format based on the signal strength values held in the
 	   signal[][] array.  The image created is rotated counter-clockwise
@@ -296,10 +323,10 @@ int DoSigStr(char *filename, unsigned char geo, unsigned char kml,
 
 	if( filename != NULL ) {
 
-		if (filename[0] == 0) {
-			strncpy(filename, xmtr[0].filename, 254);
-			filename[strlen(filename) - 4] = 0;	/* Remove .qth */
-		}
+			if (filename[0] == 0) {
+				snprintf(filename, 255, "%s", xmtr[0].filename);
+				filename[strlen(filename) - 4] = 0;	/* Remove .qth */
+			}
 
 		if(image_get_filename(&ctx,mapfile,sizeof(mapfile),filename) != 0){
 			spdlog::error("Error creating file name");
@@ -326,6 +353,7 @@ int DoSigStr(char *filename, unsigned char geo, unsigned char kml,
 
 	east = (minwest < 180.0 ? -minwest : 360.0 - min_west);
 	west = (double)(max_west < 180 ? -max_west : 360 - max_west);
+	image_set_geo_bounds(&ctx, (double)max_north, east, (double)min_north, west);
 
 	spdlog::debug("Writing \"{}\" ({} x {} pixmap image)...",
 			filename != NULL ? mapfile : "to stdout", width, (kml ? height : height + 30));
@@ -356,8 +384,7 @@ int DoSigStr(char *filename, unsigned char geo, unsigned char kml,
                                 }
 				*/
 
-				if (x0 >= 0 && x0 <= mpi && y0 >= 0
-				    && y0 <= mpi)
+				if (DemPointInBounds(indx, x0, y0))
 					found = 1;
 				else
 					indx++;
@@ -512,6 +539,8 @@ int DoSigStr(char *filename, unsigned char geo, unsigned char kml,
 void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 	      unsigned char ngs, struct site *xmtr, unsigned char txsites)
 {
+	(void)geo;
+	(void)txsites;
 	/* This function generates a topographic map in Portable Pix Map
 	   (PPM) format based on the signal power level values held in the
 	   signal[][] array.  The image created is rotated counter-clockwise
@@ -526,8 +555,9 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 	FILE *fd;
 	image_ctx_t ctx;
 	int success;
+	const uint8_t overlay_alpha = (uint8_t)140; /* round(255 * 0.55) */
 
-	if( (success = image_init(&ctx, width, (kml ? height : height + 30), IMAGE_RGB, IMAGE_DEFAULT)) != 0 ){
+	if( (success = image_init(&ctx, width, (kml ? height : height + 30), IMAGE_RGBA, IMAGE_DEFAULT)) != 0 ){
 		spdlog::error("Error initializing image: {}", strerror(success));
 		exit(success);
 	}
@@ -544,10 +574,10 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 
 	if( filename != NULL ) {
 
-		if (filename[0] == 0) {
-			strncpy(filename, xmtr[0].filename, 254);
-			filename[strlen(filename) - 4] = 0;	/* Remove .qth */
-		}
+			if (filename[0] == 0) {
+				snprintf(filename, 255, "%s", xmtr[0].filename);
+				filename[strlen(filename) - 4] = 0;	/* Remove .qth */
+			}
 
 		if(image_get_filename(&ctx,mapfile,sizeof(mapfile),filename) != 0){
 			spdlog::error("Error creating file name");
@@ -574,6 +604,7 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 
 	east = (minwest < 180.0 ? -minwest : 360.0 - min_west);
 	west = (double)(max_west < 180 ? -max_west : 360 - max_west);
+	image_set_geo_bounds(&ctx, (double)max_north, east, (double)min_north, west);
 
 	spdlog::debug("Writing \"{}\" ({} x {} pixmap image)...",
 			(filename != NULL ? mapfile : "to stdout"), width, (kml ? height : height));
@@ -598,8 +629,7 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 					       ((double)dem[indx].max_west,lon)));
 
 
-				if (x0 >= 0 && x0 <= mpi && y0 >= 0
-				    && y0 <= mpi)
+				if (DemPointInBounds(indx, x0, y0))
 					found = 1;
 				else
 					indx++;
@@ -638,91 +668,91 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 				if (mask & 2) {
 					/* Text Labels: Red or otherwise */
 
-					if (red >= 180 && green <= 75
-					    && blue <= 75 && dBm != 0)
-						ADD_PIXEL(&ctx, 255 ^ red,
-							255 ^ green,
-							255 ^ blue);
-					else
-						ADD_PIXEL(&ctx, 255, 0,
-							0);
+						if (red >= 180 && green <= 75
+						    && blue <= 75 && dBm != 0)
+							ADD_PIXELA(&ctx, 255 ^ red,
+								255 ^ green,
+								255 ^ blue, 255);
+						else
+							ADD_PIXELA(&ctx, 255, 0,
+								0, 255);
 
 					cityorcounty = 1;
 				}
 
-				else if (mask & 4) {
-					/* County Boundaries: Black */
-					ADD_PIXEL(&ctx, 0, 0, 0);
-					cityorcounty = 1;
-				}
+					else if (mask & 4) {
+						/* County Boundaries: Black */
+						ADD_PIXELA(&ctx, 0, 0, 0, 255);
+						cityorcounty = 1;
+					}
 
 				if (cityorcounty == 0) {
-					if (contour_threshold != 0
-					    && dBm < contour_threshold) {
-						if (ngs)	/* No terrain */
-							ADD_PIXEL(&ctx,
-								255, 255, 255);
-						else {
-							/* Display land or sea elevation */
-
-							if (dem[indx].
-							    data[x0][y0] == 0)
-								ADD_PIXEL(&ctx,
-									0, 0,
-									170);
+						if (contour_threshold != 0
+						    && dBm < contour_threshold) {
+							if (ngs)	/* No terrain */
+								ADD_PIXELA(&ctx,
+									255, 255, 255, 0);
 							else {
-								terrain =
-								    (unsigned)
-								    (0.5 +
-								     pow((double)(dem[indx].data[x0][y0] - min_elevation), one_over_gamma) * conversion);
-								ADD_PIXEL(&ctx,
-									terrain,
-									terrain,
-									terrain);
+								/* Display land or sea elevation */
+
+								if (dem[indx].
+								    data[x0][y0] == 0)
+									ADD_PIXELA(&ctx,
+										0, 0,
+										170, 0);
+								else {
+									terrain =
+									    (unsigned)
+									    (0.5 +
+									     pow((double)(dem[indx].data[x0][y0] - min_elevation), one_over_gamma) * conversion);
+									ADD_PIXELA(&ctx,
+										terrain,
+										terrain,
+										terrain, 0);
+								}
 							}
-						}
 					}
 
 					else {
 						/* Plot signal power level regions in color */
 
-						if (red != 0 || green != 0
-						    || blue != 0)
-							ADD_PIXEL(&ctx,
-								red, green,
-								blue);
+							if (red != 0 || green != 0
+							    || blue != 0)
+								ADD_PIXELA(&ctx,
+									red, green,
+									blue, overlay_alpha);
 
-						else {	/* terrain / sea-level */
+							else {	/* terrain / sea-level */
 
-							if (ngs)
-								ADD_PIXEL(&ctx, 
-									255,
-									255,
-									255); // WHITE
-							else {
-								if (dem[indx].
-								    data[x0][y0]
-								    == 0)
-									ADD_PIXEL(&ctx, 
-									     0,
-									     0,
-									     170); // BLUE
+								if (ngs)
+									ADD_PIXELA(&ctx, 
+										255,
+										255,
+										255, 0); // WHITE transparent
 								else {
-									/* Elevation: Greyscale */
-									terrain
+									if (dem[indx].
+									    data[x0][y0]
+									    == 0)
+										ADD_PIXELA(&ctx, 
+										     0,
+										     0,
+										     170, 0); // BLUE transparent
+									else {
+										/* Elevation: Greyscale */
+										terrain
 									    =
 									    (unsigned)
 									    (0.5
 									     +
 									     pow
 									     ((double)(dem[indx].data[x0][y0] - min_elevation), one_over_gamma) * conversion);
-									ADD_PIXEL(&ctx, 
-									     terrain,
-									     terrain,
-									     terrain);
+										ADD_PIXELA(&ctx, 
+										     terrain,
+										     terrain,
+										     terrain, 0);
+									}
 								}
 							}
-						}
 					}
 				}
 			}
@@ -731,8 +761,8 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 				/* We should never get here, but if */
 				/* we do, display the region as black */
 
-				ADD_PIXEL(&ctx, 255, 255, 255);
-			}
+					ADD_PIXELA(&ctx, 255, 255, 255, 0);
+				}
 		}
 	}
 
@@ -755,6 +785,8 @@ void DoRxdPwr(char *filename, unsigned char geo, unsigned char kml,
 void DoLOS(char *filename, unsigned char geo, unsigned char kml,
 	   unsigned char ngs, struct site *xmtr, unsigned char txsites)
 {
+	(void)geo;
+	(void)txsites;
 	/* This function generates a topographic map in Portable Pix Map
 	   (PPM) format based on the signal power level values held in the
 	   signal[][] array.  The image created is rotated counter-clockwise
@@ -763,14 +795,18 @@ void DoLOS(char *filename, unsigned char geo, unsigned char kml,
 
 	char mapfile[255];
 	unsigned terrain;
-	unsigned char found, mask;
+	unsigned char mask;
 	int indx, x, y, x0 = 0, y0 = 0;
 	double conversion, one_over_gamma, lat, lon, minwest;
 	FILE *fd;
 	image_ctx_t ctx;
 	int success;
+	const uint8_t overlay_alpha = (uint8_t)rint(255.0 * 0.55); /* matches old convert rgba(...,0.55) */
+	auto add_overlay_pixel = [&](uint8_t r, uint8_t g, uint8_t b) {
+		ADD_PIXELA(&ctx, r, g, b, overlay_alpha);
+	};
 
-	if((success = image_init(&ctx, width, (kml ? height : height + 30), IMAGE_RGB, IMAGE_DEFAULT)) != 0){
+	if((success = image_init(&ctx, width, (kml ? height : height + 30), IMAGE_RGBA, IMAGE_DEFAULT)) != 0){
 		spdlog::error("Error initializing image: {}", strerror(success));
 		exit(success);
 	}
@@ -782,10 +818,10 @@ void DoLOS(char *filename, unsigned char geo, unsigned char kml,
 
 	if( filename != NULL ){
 
-		if (filename[0] == 0) {
-			strncpy(filename, xmtr[0].filename, 254);
-			filename[strlen(filename) - 4] = 0;	/* Remove .qth */
-		}
+			if (filename[0] == 0) {
+				snprintf(filename, 255, "%s", xmtr[0].filename);
+				filename[strlen(filename) - 4] = 0;	/* Remove .qth */
+			}
 
 		if(image_get_filename(&ctx,mapfile,sizeof(mapfile),filename) != 0){
 			spdlog::error("Error creating file name");
@@ -812,169 +848,135 @@ void DoLOS(char *filename, unsigned char geo, unsigned char kml,
 
 	east = (minwest < 180.0 ? -minwest : 360.0 - min_west);
 	west = (double)(max_west < 180 ? -max_west : 360 - max_west);
+	image_set_geo_bounds(&ctx, (double)max_north, east, (double)min_north, west);
 
 	spdlog::debug("Writing \"{}\" ({} x {} pixmap image)...\n",
 			filename != NULL ? mapfile : "to stdout", width, (kml ? height : height + 30));
 
-	for (y = 0, lat = north; y < (int)height;
-	     y++, lat = north - (dpp * (double)y)) {
-		for (x = 0, lon = max_west; x < (int)width;
-		     x++, lon = max_west - (dpp * (double)x)) {
+	for (y = 0, lat = (double)max_north - dpp; y < height; y++, lat -= dpp) {
+		for (x = 0, lon = max_west; x < width; x++, lon -= dpp) {
 			if (lon < 0.0)
 				lon += 360.0;
 
-			for (indx = 0, found = 0;
-			     indx < MAXPAGES && found == 0;) {
-				x0 = (int)rint(ppd *
-					       (lat -
-						(double)dem[indx].min_north));
-				y0 = mpi -
-				    (int)rint(ppd *
-					      (LonDiff
-					       ((double)dem[indx].max_west,
-						lon)));
-
-				if (x0 >= 0 && x0 <= mpi && y0 >= 0
-				    && y0 <= mpi)
-					found = 1;
-				else
-					indx++;
-			}
-
-			if (found) {
+			if (map_to_dem_indices(lat, lon, indx, x0, y0)) {
 				mask = dem[indx].mask[x0][y0];
 
 				if (mask & 2)
 					/* Text Labels: Red */
-					ADD_PIXEL(&ctx, 255, 0, 0);
+					add_overlay_pixel(255, 0, 0);
 
 				else if (mask & 4)
 					/* County Boundaries: Light Cyan */
-					ADD_PIXEL(&ctx, 128, 128, 255);
+					add_overlay_pixel(128, 128, 255);
 
 				else
 					switch (mask & 57) {
-					case 1:
-						/* TX1: Green */
-						ADD_PIXEL(&ctx, 0, 255,
-							0);
-						break;
+						case 1:
+							/* TX1: Green */
+							add_overlay_pixel(0, 255, 0);
+							break;
 
-					case 8:
-						/* TX2: Cyan */
-						ADD_PIXEL(&ctx, 0, 255,
-							255);
-						break;
+						case 8:
+							/* TX2: Cyan */
+							add_overlay_pixel(0, 255, 255);
+							break;
 
-					case 9:
-						/* TX1 + TX2: Yellow */
-						ADD_PIXEL(&ctx, 255, 255,
-							0);
-						break;
+						case 9:
+							/* TX1 + TX2: Yellow */
+							add_overlay_pixel(255, 255, 0);
+							break;
 
-					case 16:
-						/* TX3: Medium Violet */
-						ADD_PIXEL(&ctx, 147, 112,
-							219);
-						break;
+						case 16:
+							/* TX3: Medium Violet */
+							add_overlay_pixel(147, 112, 219);
+							break;
 
-					case 17:
-						/* TX1 + TX3: Pink */
-						ADD_PIXEL(&ctx, 255, 192,
-							203);
-						break;
+						case 17:
+							/* TX1 + TX3: Pink */
+							add_overlay_pixel(255, 192, 203);
+							break;
 
-					case 24:
-						/* TX2 + TX3: Orange */
-						ADD_PIXEL(&ctx, 255, 165,
-							0);
-						break;
+						case 24:
+							/* TX2 + TX3: Orange */
+							add_overlay_pixel(255, 165, 0);
+							break;
 
-					case 25:
-						/* TX1 + TX2 + TX3: Dark Green */
-						ADD_PIXEL(&ctx, 0, 100,
-							0);
-						break;
+						case 25:
+							/* TX1 + TX2 + TX3: Dark Green */
+							add_overlay_pixel(0, 100, 0);
+							break;
 
-					case 32:
-						/* TX4: Sienna 1 */
-						ADD_PIXEL(&ctx, 255, 130,
-							71);
-						break;
+						case 32:
+							/* TX4: Sienna 1 */
+							add_overlay_pixel(255, 130, 71);
+							break;
 
-					case 33:
-						/* TX1 + TX4: Green Yellow */
-						ADD_PIXEL(&ctx, 173, 255,
-							47);
-						break;
+						case 33:
+							/* TX1 + TX4: Green Yellow */
+							add_overlay_pixel(173, 255, 47);
+							break;
 
-					case 40:
-						/* TX2 + TX4: Dark Sea Green 1 */
-						ADD_PIXEL(&ctx, 193, 255,
-							193);
-						break;
+						case 40:
+							/* TX2 + TX4: Dark Sea Green 1 */
+							add_overlay_pixel(193, 255, 193);
+							break;
 
-					case 41:
-						/* TX1 + TX2 + TX4: Blanched Almond */
-						ADD_PIXEL(&ctx, 255, 235,
-							205);
-						break;
+						case 41:
+							/* TX1 + TX2 + TX4: Blanched Almond */
+							add_overlay_pixel(255, 235, 205);
+							break;
 
-					case 48:
-						/* TX3 + TX4: Dark Turquoise */
-						ADD_PIXEL(&ctx, 0, 206,
-							209);
-						break;
+						case 48:
+							/* TX3 + TX4: Dark Turquoise */
+							add_overlay_pixel(0, 206, 209);
+							break;
 
-					case 49:
-						/* TX1 + TX3 + TX4: Medium Spring Green */
-						ADD_PIXEL(&ctx, 0, 250,
-							154);
-						break;
+						case 49:
+							/* TX1 + TX3 + TX4: Medium Spring Green */
+							add_overlay_pixel(0, 250, 154);
+							break;
 
-					case 56:
-						/* TX2 + TX3 + TX4: Tan */
-						ADD_PIXEL(&ctx, 210, 180,
-							140);
-						break;
+						case 56:
+							/* TX2 + TX3 + TX4: Tan */
+							add_overlay_pixel(210, 180, 140);
+							break;
 
-					case 57:
-						/* TX1 + TX2 + TX3 + TX4: Gold2 */
-						ADD_PIXEL(&ctx, 238, 201,
-							0);
-						break;
+						case 57:
+							/* TX1 + TX2 + TX3 + TX4: Gold2 */
+							add_overlay_pixel(238, 201, 0);
+							break;
 
-					default:
-						if (ngs)	/* No terrain */
-							ADD_PIXEL(&ctx, 
-								255, 255, 255);
-						else {
-							/* Sea-level: Medium Blue */
-							if (dem[indx].
-							    data[x0][y0] == 0)
-								ADD_PIXEL(&ctx, 
-									0, 0,
-									170);
+						default:
+							if (ngs)	/* No terrain */
+								ADD_PIXELA(&ctx, 
+									255, 255, 255, 0);
 							else {
-								/* Elevation: Greyscale */
-								terrain =
-								    (unsigned)
-								    (0.5 +
-								     pow((double)(dem[indx].data[x0][y0] - min_elevation), one_over_gamma) * conversion);
-								ADD_PIXEL(&ctx, 
-									terrain,
-									terrain,
-									terrain);
+								/* Sea-level: Medium Blue */
+								if (dem[indx].
+								    data[x0][y0] == 0)
+									ADD_PIXELA(&ctx, 
+										0, 0,
+										170, 0);
+								else {
+									/* Elevation: Greyscale */
+									terrain =
+									    (unsigned)
+									    (0.5 +
+									     pow((double)(dem[indx].data[x0][y0] - min_elevation), one_over_gamma) * conversion);
+									ADD_PIXELA(&ctx, 
+										terrain,
+										terrain,
+										terrain, 0);
+								}
 							}
 						}
-					}
 			}
 
 			else {
 				/* We should never get here, but if */
 				/* we do, display the region as black */
 
-				ADD_PIXEL(&ctx, 255, 255, 255);
+				ADD_PIXELA(&ctx, 255, 255, 255, 0);
 			}
 		}
 	}
@@ -1178,10 +1180,13 @@ void PathReport(struct site source, struct site destination, char *name,
 		case 8:
 			fprintf(fd2, "ITWOM 3.0\n");
 			break;
-		case 9:
-			fprintf(fd2, "Ericsson\n");
-			break;
-		}
+			case 9:
+				fprintf(fd2, "Ericsson\n");
+				break;
+			default:
+				fprintf(fd2, "Unknown (%d)\n", (int)propmodel);
+				break;
+			}
 
 		fprintf(fd2, "Model sub-type: ");
 
